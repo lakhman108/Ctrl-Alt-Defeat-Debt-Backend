@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from plaid.api import plaid_api
 import plaid
 from plaid.api import plaid_api
-from openai import OpenAI
+import google.generativeai as genai
 from dotenv import load_dotenv
 import os
 import json
@@ -15,10 +15,9 @@ import requests
 # Load the .env file. If it's in the same directory as your script, you can call load_dotenv() without any arguments.
 load_dotenv()
 
-api_key = os.getenv("OPENAI_API_KEY")
-openai_client = OpenAI(
-    api_key=api_key
-)
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=gemini_api_key)
+model = genai.GenerativeModel('gemini-pro')
 
 client_id = os.getenv('PLAID_CLIENT_ID')
 secret_id = os.getenv('PLAID_SECRET')
@@ -96,83 +95,30 @@ def ai_response():
         transactions_response = get_plaid_transactions(access_token)
         transactions_data = transactions_response.to_dict()
 
-        # Construct the goals request payload
-        goals_payload = {
-            "model": "gpt-3.5-turbo-0125",
-            "response_format": {"type": "json_object"},
-            "messages":  [
-                {"role": "system", "content": system_prompt}, 
-                {"role": "user", "content": f"{transactions_data}, {goal_object}"},
-                {"role": "assistant", "content": savings_example_json}
-            ],
-            "temperature":  0.2
-        }
-        
-        # Construct the predictions request payload
-        predictions_payload = {
-            "model": "gpt-3.5-turbo-0125",
-            "response_format": {"type": "json_object"},
-            "messages":  [
-                {"role": "system", "content": insights_system_prompt}, 
-                {"role": "user", "content": f"{transactions_data}"},
-                {"role": "assistant", "content": insights_assistant}
-            ],
-            "temperature":  0.2
+        insights_payload = {
+            "transactions": transactions_data,
+            "goal": goal_object
         }
 
-        # Make the request to the OpenAI API
-        response_goals = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            json=goals_payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
-            }
+        response = model.generate_content(insights_payload)
+        insights_json = response.json()
+
+        new_db_insight = Insight(
+            savings_monthly=insights_json['savings_monthly'],
+            savings_needed=insights_json['savings_needed'],
+            strategy=insights_json['strategy'],
+            personal_goal_id=user_personal_goal.id
         )
 
-        # Check if the goals request was successful
-        if response_goals.status_code != 200:
-            return jsonify({"error_goals": f"OpenAI API request for goals failed with status code {response_goals.status_code}"}), response_goals.status_code
-
-        # Make the request to the OpenAI API for predictions
-        response_predictions = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            json=predictions_payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
-            }
-        )
-        print(user_personal_goal.id)
-        # Check if the predictions request was successful
-        if response_predictions.status_code != 200:
-            return jsonify({"error_predictions": f"OpenAI API request for predictions failed with status code {response_predictions.status_code}"}), response_predictions.status_code
-        
-        # parses ai responses to a valid JSON object
-        goals_json = json.loads(response_goals.json()['choices'][0]['message']['content'])
-        # print(goals_json)
-        
-        predictions_json = json.loads(response_predictions.json()['choices'][0]['message']['content'])
-        print(predictions_json)
-        
-        
-        # creates a new instance of a model and adds response from gpt to db
-        new_db_insight = Insight(savings_monthly=goals_json['savings_monthly'], savings_needed=goals_json['savings_needed'], strategy=goals_json['strategy'], personal_goal_id=user_personal_goal.id)
-        
         db.session.add(new_db_insight)
         db.session.commit()
-        
-        for action in goals_json['actions']:
+
+        for action in insights_json['actions']:
             new_db_action = Action(text=action, insight_id=new_db_insight.id)
             db.session.add(new_db_action)
             db.session.commit()
-        
 
-        # Return both responses
-        return {
-            "goals": goals_json,
-            "predictions": predictions_json
-        }
+        return jsonify(insights_json)
 
     except Exception as e:
-        return jsonify({"error_loser": str(e)}), 500
+        return jsonify({"error": str(e)}), 500
